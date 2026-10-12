@@ -306,11 +306,13 @@ h1 span { font-weight: 200; }
     frost: {
       name: 'Frost',
       colour: '#8fd0ff',
-      blurb: 'Slows everything near it. Barely hurts.',
+      blurb: 'Icy blasts. Hurts and slows everything near it.',
+      // Each blast chills for `chill` seconds, longer than the gap between
+      // blasts, so anything that stays in reach stays slowed.
       levels: [
-        { cost: 70, slow: 0.35, dmg: 2, range: 72 },
-        { cost: 80, slow: 0.45, dmg: 5, range: 84 },
-        { cost: 150, slow: 0.55, dmg: 10, range: 96 },
+        { cost: 70, slow: 0.4, dmg: 5, rate: 0.8, range: 75, chill: 2 },
+        { cost: 80, slow: 0.48, dmg: 9, rate: 0.9, range: 86, chill: 2 },
+        { cost: 150, slow: 0.56, dmg: 15, rate: 1, range: 98, chill: 2.2 },
       ],
     },
     arc: {
@@ -561,7 +563,6 @@ h1 span { font-weight: 200; }
       recoil: 0,
       target: null,
       heat: 0,
-      active: false,
       mode: 'first',
       spent: cost,
       fired: false,
@@ -583,7 +584,7 @@ h1 span { font-weight: 200; }
     this.credits -= cost;
     t.spent += cost;
     t.level++;
-    this.events.push({ t: 'upgrade', x: t.x, y: t.y, colour: LL.TOWERS[t.type].colour });
+    this.events.push({ t: 'upgrade', x: t.x, y: t.y, colour: LL.TOWERS[t.type].colour, level: t.level, max: t.level === LL.TOWERS[t.type].levels.length - 1 });
     return true;
   };
 
@@ -643,6 +644,8 @@ h1 span { font-weight: 200; }
       armour: (def.armour || 0) * (1 + 0.1 * (this.wave - 1)),
       r: def.r,
       slow: 0,
+      chill: 0,
+      chillT: 0,
       flash: 0,
       alive: true,
       seed: (id * 0.618034) % 1,
@@ -705,13 +708,21 @@ h1 span { font-weight: 200; }
     if (t.recoil > 0) t.recoil = Math.max(0, t.recoil - dt * 6);
 
     if (t.type === 'frost') {
-      t.active = false;
+      if (t.cool > 0) return;
+      let any = false;
       for (const e of this.enemies) {
         if (!e.alive || !inRange(t, e, s.range)) continue;
-        if (s.slow > e.slow) e.slow = s.slow;
-        this.damage(e, s.dmg * dt, true);
-        t.active = true;
+        any = true;
+        if (s.slow >= e.chill || e.chillT <= 0) e.chill = s.slow;
+        e.chillT = Math.max(e.chillT, s.chill);
+        e.slow = Math.max(e.slow, e.chill);
+        this.damage(e, s.dmg, true);
+      }
+      if (any) {
+        t.cool = 1 / s.rate;
+        t.recoil = 1;
         t.fired = true;
+        this.events.push({ t: 'frost', x: t.x, y: t.y, r: s.range });
       }
       return;
     }
@@ -855,7 +866,8 @@ h1 span { font-weight: 200; }
 
     const es = this.enemies;
     for (const e of es) {
-      e.slow = 0;
+      if (e.chillT > 0) e.chillT -= dt;
+      e.slow = e.chillT > 0 ? e.chill : 0;
       if (e.flash > 0) e.flash -= dt;
     }
     for (const t of this.towers) this.runTower(t, dt);
@@ -971,17 +983,46 @@ h1 span { font-weight: 200; }
   LL.drawTower = function (ctx, type, level, angle, time, recoil, heat) {
     const c = LL.TOWERS[type].colour;
     ctx.lineJoin = 'round';
+    // Level 1: a thin dim plate. Level 2: a bright thick plate with corner
+    // brackets. Level 3: a gold plate with gold studs. Readable at a glance.
+    const GOLD = '#ffd76a';
     roundRect(ctx, -15, -15, 30, 30, 7);
     ctx.fillStyle = '#0d1226';
     ctx.fill();
-    ctx.lineWidth = 1.5;
-    ctx.strokeStyle = rgba(c, 0.55);
+    if (level > 0) {
+      ctx.fillStyle = rgba(c, level === 1 ? 0.14 : 0.26);
+      ctx.fill();
+    }
+    ctx.lineWidth = level === 0 ? 1.5 : 2.5;
+    ctx.strokeStyle = level === 0 ? rgba(c, 0.5) : level === 1 ? c : GOLD;
     ctx.stroke();
-    for (let i = 0; i <= level; i++) {
-      ctx.fillStyle = c;
-      ctx.fillRect(-7 + i * 5.5, 10.5, 3.5, 2);
+    if (level === 1) {
+      ctx.strokeStyle = '#fff';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      for (const [sx, sy] of [[-1, -1], [1, -1], [1, 1], [-1, 1]]) {
+        ctx.moveTo(sx * 17.5, sy * 11);
+        ctx.lineTo(sx * 17.5, sy * 17.5);
+        ctx.lineTo(sx * 11, sy * 17.5);
+      }
+      ctx.stroke();
+    } else if (level === 2) {
+      ctx.strokeStyle = rgba(c, 0.9);
+      ctx.lineWidth = 1;
+      roundRect(ctx, -12, -12, 24, 24, 5);
+      ctx.stroke();
+      ctx.fillStyle = GOLD;
+      for (const [sx, sy] of [[-1, -1], [1, -1], [1, 1], [-1, 1]]) {
+        ctx.beginPath();
+        ctx.moveTo(sx * 15, sy * 15 - 4.5);
+        ctx.lineTo(sx * 15 + 4.5, sy * 15);
+        ctx.lineTo(sx * 15, sy * 15 + 4.5);
+        ctx.lineTo(sx * 15 - 4.5, sy * 15);
+        ctx.fill();
+      }
     }
     ctx.save();
+    ctx.scale(1 + level * 0.1, 1 + level * 0.1);
     ctx.strokeStyle = c;
     ctx.lineWidth = 2;
     if (type === 'pulse') {
@@ -1177,10 +1218,19 @@ h1 span { font-weight: 200; }
     }
     ctx.restore();
     if (e.slow > 0) {
-      ctx.strokeStyle = 'rgba(160,220,255,.7)';
-      ctx.lineWidth = 1;
+      ctx.fillStyle = 'rgba(150,215,255,.38)';
+      ctx.strokeStyle = '#d9f2ff';
+      ctx.lineWidth = 1.5;
       ctx.beginPath();
-      ctx.arc(e.x, e.y, r + 4, 0, TAU);
+      ctx.arc(e.x, e.y, r + 3, 0, TAU);
+      ctx.fill();
+      ctx.stroke();
+      ctx.beginPath();
+      for (let i = 0; i < 6; i++) {
+        const a = (i / 6) * TAU + e.seed * 6;
+        ctx.moveTo(e.x + Math.cos(a) * (r + 3), e.y + Math.sin(a) * (r + 3));
+        ctx.lineTo(e.x + Math.cos(a) * (r + 7), e.y + Math.sin(a) * (r + 7));
+      }
       ctx.stroke();
     }
     if (e.hp < e.maxHp) {
@@ -1348,10 +1398,21 @@ h1 span { font-weight: 200; }
         this.ring(ev.x, ev.y, ev.colour, 30, 12, 0.3, 2);
         this.spark(ev.x, ev.y, ev.colour, 10, 80, 0.4);
         break;
-      case 'upgrade':
-        this.ring(ev.x, ev.y, ev.colour, 10, 34, 0.4, 3);
-        this.ring(ev.x, ev.y, '#ffffff', 6, 24, 0.3, 2);
-        this.spark(ev.x, ev.y, ev.colour, 16, 110, 0.5);
+      case 'upgrade': {
+        const col = ev.max ? '#ffd76a' : ev.colour;
+        this.ring(ev.x, ev.y, col, 10, 60, 0.6, 4);
+        this.ring(ev.x, ev.y, '#ffffff', 6, 38, 0.4, 3);
+        this.ring(ev.x, ev.y, col, 60, 14, 0.35, 2);
+        this.spark(ev.x, ev.y, col, 30, 160, 0.7);
+        this.spark(ev.x, ev.y, '#ffffff', 12, 90, 0.5);
+        this.parts.push({ k: 2, x: ev.x, y: ev.y, life: 0.45, max: 0.45, colour: col, size: 70 });
+        this.text(ev.x, ev.y - 20, ev.max ? 'MAX LEVEL' : 'LEVEL ' + (ev.level + 1), ev.max ? '#ffd76a' : '#ffffff');
+        break;
+      }
+      case 'frost':
+        this.ring(ev.x, ev.y, '#d9f2ff', 8, ev.r, 0.4, 4);
+        this.ring(ev.x, ev.y, '#8fd0ff', 4, ev.r * 0.7, 0.3, 2);
+        this.spark(ev.x, ev.y, '#d9f2ff', 8, ev.r * 2.2, 0.4);
         break;
       case 'sell':
         this.spark(ev.x, ev.y, ev.colour, 14, 100, 0.4);
@@ -1519,16 +1580,29 @@ h1 span { font-weight: 200; }
     for (const t of game.towers) {
       if (t.type !== 'frost') continue;
       const s = game.stats(t);
-      glow(ctx, '#8fd0ff', t.x, t.y, s.range, t.active ? 0.16 : 0.07);
+      glow(ctx, '#8fd0ff', t.x, t.y, s.range, 0.07 + t.recoil * 0.25);
       const f = (time * 0.55 + t.id * 0.37) % 1;
-      ctx.strokeStyle = rgba('#8fd0ff', (1 - f) * (t.active ? 0.5 : 0.2));
+      ctx.strokeStyle = rgba('#8fd0ff', (1 - f) * 0.2);
       ctx.lineWidth = 1.5;
       ctx.beginPath();
       ctx.arc(t.x, t.y, s.range * f, 0, TAU);
       ctx.stroke();
     }
     // enemy and tower halos
-    for (const t of game.towers) glow(ctx, LL.TOWERS[t.type].colour, t.x, t.y, 26, 0.22);
+    for (const t of game.towers) {
+      glow(ctx, LL.TOWERS[t.type].colour, t.x, t.y, 26 + t.level * 7, 0.22 + t.level * 0.14);
+      if (t.level === 2) {
+        glow(ctx, '#ffd76a', t.x, t.y, 30, 0.2 + 0.08 * Math.sin(time * 3 + t.id));
+        ctx.strokeStyle = rgba('#ffd76a', 0.55);
+        ctx.lineWidth = 1.5;
+        ctx.setLineDash([4, 7]);
+        ctx.lineDashOffset = time * 10;
+        ctx.beginPath();
+        ctx.arc(t.x, t.y, 23, 0, TAU);
+        ctx.stroke();
+        ctx.setLineDash([]);
+      }
+    }
     for (const e of game.enemies) glow(ctx, e.def.colour, e.x, e.y, e.r * 2.6, e.type === 'swarm' ? 0.14 : 0.35);
     ctx.globalCompositeOperation = 'source-over';
 
@@ -1707,6 +1781,11 @@ h1 span { font-weight: 200; }
     const AC = window.AudioContext || window.webkitAudioContext;
     if (!AC) return;
     ctx = new AC();
+    if (ctx.state === 'suspended') ctx.resume();
+    // iPhones mute web sound when the ringer switch is off unless told this is a game.
+    try {
+      if (navigator.audioSession) navigator.audioSession.type = 'playback';
+    } catch (e) {}
     master = ctx.createGain();
     master.gain.value = muted ? 0 : 1;
     master.connect(ctx.destination);
@@ -1778,7 +1857,18 @@ h1 span { font-weight: 200; }
     bosskill: [0.5, () => { noise(1.2, 0.5, 2500); tone({ f: 200, f2: 30, dur: 1.1, vol: 0.5 }); [0, 4, 7, 12].forEach((n, i) => tone({ f: midi(72 + n), type: 'triangle', dur: 0.5, vol: 0.15, at: 0.15 + i * 0.09 })); }],
     leak: [0.1, () => { tone({ f: 180, f2: 50, type: 'sawtooth', dur: 0.45, vol: 0.3 }); noise(0.3, 0.2, 800); }],
     build: [0.05, () => { tone({ f: 330, f2: 660, type: 'triangle', dur: 0.12, vol: 0.2 }); tone({ f: 990, dur: 0.1, vol: 0.08, at: 0.06 }); }],
-    upgrade: [0.05, () => [0, 7, 12].forEach((n, i) => tone({ f: midi(69 + n), type: 'triangle', dur: 0.16, vol: 0.16, at: i * 0.06 }))],
+    upgrade: [0.05, () => {
+      tone({ f: 180, f2: 720, type: 'sawtooth', dur: 0.28, vol: 0.14 });
+      [0, 4, 7, 12].forEach((n, i) => tone({ f: midi(72 + n), type: 'square', dur: 0.22, vol: 0.13, at: 0.05 + i * 0.07 }));
+      tone({ f: midi(96), type: 'triangle', dur: 0.5, vol: 0.2, at: 0.33 });
+    }],
+    upgrademax: [0.05, () => {
+      tone({ f: 140, f2: 880, type: 'sawtooth', dur: 0.4, vol: 0.16 });
+      [0, 4, 7, 12, 16, 19, 24].forEach((n, i) => tone({ f: midi(67 + n), type: 'square', dur: 0.25, vol: 0.13, at: 0.05 + i * 0.06 }));
+      [0, 4, 7].forEach((n) => tone({ f: midi(91 + n), type: 'triangle', dur: 0.9, vol: 0.14, at: 0.5 }));
+      noise(0.5, 0.12, 9000, 0.5);
+    }],
+    frost: [0.12, () => { tone({ f: 2400, f2: 900, dur: 0.22, vol: 0.07 }); tone({ f: 3200, f2: 1500, type: 'triangle', dur: 0.18, vol: 0.05 }); noise(0.15, 0.05, 8000); }],
     sell: [0.05, () => tone({ f: 660, f2: 220, type: 'triangle', dur: 0.18, vol: 0.16 })],
     nope: [0.15, () => tone({ f: 140, f2: 110, type: 'square', dur: 0.12, vol: 0.08 })],
     tap: [0.03, () => tone({ f: 700, dur: 0.04, vol: 0.08 })],
@@ -1792,7 +1882,7 @@ h1 span { font-weight: 200; }
   };
 
   function play(name) {
-    if (!ctx || muted || ctx.state !== 'running') return;
+    if (!ctx || muted) return;
     const s = SFX[name];
     const now = ctx.currentTime;
     if (now - (last[name] || -9) < s[0]) return;
@@ -1844,7 +1934,8 @@ h1 span { font-weight: 200; }
         case 'kill': play(ev.type === 'boss' ? 'bosskill' : 'kill'); break;
         case 'leak': play('leak'); break;
         case 'build': play('build'); break;
-        case 'upgrade': play('upgrade'); break;
+        case 'upgrade': play(ev.max ? 'upgrademax' : 'upgrade'); break;
+        case 'frost': play('frost'); break;
         case 'sell': play('sell'); break;
         case 'waveStart': play(ev.boss ? 'bosswave' : 'wave'); break;
         case 'waveClear': play('clear'); break;
@@ -1892,7 +1983,7 @@ h1 span { font-weight: 200; }
 
   // What to tell the player the first time each enemy turns up.
   const HINTS = {
-    dart: 'Darts are fast. Frost slows them down.',
+    dart: 'Darts are fast. A Frost tower slows them down.',
     swarm: 'Mites come in crowds. Arc and Mortar clear crowds.',
     shell: 'Shells are armoured. Pulse barely scratches them. Use Lance or Mortar.',
     brute: 'Brutes are tough and cost two lives.',
@@ -1926,7 +2017,7 @@ h1 span { font-weight: 200; }
   }
   function statLine(type, level) {
     const s = LL.TOWERS[type].levels[level];
-    if (type === 'frost') return 'Slows ' + Math.round(s.slow * 100) + '% · reach ' + s.range;
+    if (type === 'frost') return 'Hits ' + s.dmg + ' · slows ' + Math.round(s.slow * 100) + '% · reach ' + s.range;
     if (type === 'arc') return 'Hits ' + s.dmg + ' · ' + s.chains + ' jumps · reach ' + s.range;
     if (type === 'mortar') return 'Hits ' + s.dmg + ' · blast ' + s.splash + ' · reach ' + s.range;
     if (type === 'lance') return 'Beam ' + s.dmg + ' to ' + Math.round(s.dmg * s.ramp) + ' a second';
